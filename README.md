@@ -23,7 +23,7 @@ export GYM_BOT_ADMINS="111111111,222222222"
 ```
 > Multiple admin/owner IDs ko comma se separate karein, spaces mat dein.
 
-(Alternative: `gym_bot.py` file khol ke `BOT_TOKEN` aur `ADMIN_IDS` seedhe edit kar sakte hain.)
+(Alternative: `main.py` file khol ke `BOT_TOKEN` aur `ADMIN_IDS` seedhe edit kar sakte hain.)
 
 ### Railway.app par deploy kar rahe ho?
 Railway ki filesystem **ephemeral** hoti hai — matlab redeploy/restart hone par
@@ -32,10 +32,12 @@ Railway ki filesystem **ephemeral** hoti hai — matlab redeploy/restart hone pa
   (env variable se hi, hardcode mat karein)
 - Regularly `/backup` command chalate rahein aur file safe jagah save karein
 - Agar data reset ho jaye kabhi, `/restore` se turant wapas load kar sakte hain
+- Service type **"Worker"** rakhna, "Web Service" nahi — bot koi port pe listen
+  nahi karta, isliye web health-check fail ho sakta hai
 
 ## 5. Bot run karein
 ```bash
-python gym_bot.py
+python main.py
 ```
 Bot chalte hi automatically har 24 ghante me sab members ki expiry date check karega.
 Jis din kisi member ki expiry date aayegi, sab admins/owners ko turant message chala jayega:
@@ -50,7 +52,7 @@ Aditya (7992357603) - Subscription expired on 12/07/2026
 |---|---|
 | `/add <name> <number> <dd/mm/yyyy> [duration]` | Naya member add karta hai. Duration optional hai. |
 | `/edit <number> <duration>` | Member ka subscription plan/mode change karta hai (aage renewals bhi isi duration se honge). |
-| `/members` | Sabhi members ki full detail dikhata hai (plan sahit). |
+| `/members` | Total count aur sabhi members ki compact list dikhata hai. |
 | `/due` | Jinka subscription expire ho chuka hai unki list. |
 | `/paid <number>` | Number se member dhoond kar uske plan ke hisaab se renew karta hai. |
 | `/delete <number>` | Sirf number dalke member ko permanently remove karta hai. |
@@ -87,8 +89,9 @@ Payment mark karna (member ke current plan ke hisaab se auto renew):
 ```
 /paid 7992357603
 ```
-→ Agar plan 1m hai to 1 month aage badhega, agar 3m hai to 3 month aage badhega.
-Sirf number chahiye, naam yaad rakhne ki zarurat nahi.
+→ Hamesha **purani expiry date se +plan duration** hoga (simple math), chahe member
+kitna bhi late pay kare. Agar plan 1m hai to 1 month aage badhega, agar 3m hai to
+3 month aage badhega — sirf number chahiye, naam yaad rakhne ki zarurat nahi.
 
 Backup lena:
 ```
@@ -103,6 +106,10 @@ Backup restore karna:
 ```
 → Bot poochega "please send the backup file". Uske baad wahi `.json` file bot ko
 document ke roop me bhej do, data wapas load ho jayega.
+
+### Duplicate naam handling
+Agar do members ka naam same hai (jaise dono "Aditya"), toh bot khud dusre wale ko
+`Aditya 1`, phir agla `Aditya 2` naam de dega — automatic, kuch karne ki zarurat nahi.
 
 ## Demo Output (bot exactly aisa reply karega)
 
@@ -159,7 +166,7 @@ Agar koi due nahi hai:
 No members are currently due. All subscriptions are active.
 ```
 
-**`/paid 7992357603`**
+**`/paid 7992357603`** (agar expiry thi 12/07/2026)
 ```
 Payment recorded successfully.
 
@@ -218,16 +225,12 @@ Data restored successfully. 3 member record(s) loaded.
 You are not authorized to use this bot. Please contact the gym admin.
 ```
 
-### Duplicate naam handling
-Agar do members ka naam same hai (jaise dono "Aditya"), toh bot khud dusre wale ko
-`Aditya 1`, phir agla `Aditya 2` naam de dega — automatic, kuch karne ki zarurat nahi.
-
 ## Data storage
 Sab member data `members.json` file me save hota hai (isi folder me, script ke saath).
-Railway jaise platforms par yeh permanent nahi hai, isliye `/backup` regularly lena
-zaroori hai.
+Railway jaise platforms par yeh permanent nahi hai (redeploy/restart pe delete ho
+sakta hai), isliye `/backup` regularly lete rehna zaroori hai.
 
 ## Deployment note
-Yeh script `python gym_bot.py` se local machine ya kisi bhi VPS/server par continuously
+Yeh script `python main.py` se local machine ya kisi bhi VPS/server par continuously
 chalate rehna hoga (background me, jaise `screen`, `tmux`, `systemd`, ya Railway ke
 "Worker" process ke through) taaki daily expiry check aur notifications chalte rahein.
