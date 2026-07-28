@@ -2,13 +2,6 @@
 Gym Membership Management Telegram Bot
 ========================================
 
-Storage: MongoDB (MongoDB Atlas free tier recommended)
---------------------------------------------------------
-Data is stored in MongoDB instead of a local file. This means your data
-survives Railway redeploys, restarts, and even switching to a completely
-different Railway account - because MongoDB Atlas is a separate, free,
-persistent database that lives independently of Railway.
-
 Features
 --------
 1. /add <name> <number> <dd/mm/yyyy> [duration]
@@ -21,6 +14,7 @@ Features
 
 2. /edit <number> <duration>
    - Changes a member's subscription plan/mode (e.g. monthly -> quarterly).
+   - "duration" uses the same format as /add: 1m, 3m, 6m, 12m, etc.
    - The member's expiry date is immediately recalculated from their
      original join date using the new duration, and this new duration
      becomes the default used every time /paid renews them going forward.
@@ -29,37 +23,36 @@ Features
    - Lists every member whose subscription has already expired.
 
 4. /members
-   - Shows "Total Members: N" followed by a numbered, compact list
-     (name, number, expiry) of every member.
+   - Lists every member with their full details (name, number, joined
+     date, plan, expiry date, status).
 
 5. /paid <number>
    - Looks up the member by phone number only and automatically renews
-     their subscription using their configured plan duration.
+     their subscription using their configured plan duration (1 month by
+     default, or whatever was last set with /add or /edit).
 
-6. /delete <number>
-   - Permanently removes a member using only their phone number.
-
-7. Automatic daily expiry check
+6. Automatic daily expiry check
    - Runs once every day. Any member whose subscription expires "today"
      is marked as expired and a notification is sent to every configured
      admin/owner in the exact format:
          "Aditya (7992357603) - Subscription expired on 12/07/2026"
 
-8. /backup and /restore
-   - /backup exports all current MongoDB data as a downloadable JSON file
-     (an extra manual safety net, on top of MongoDB's own persistence).
-   - /restore lets you upload a previously downloaded backup file, which
-     replaces all current data in MongoDB with the contents of that file.
+7. /backup and /restore
+   - /backup sends the current members.json data file to you as a
+     downloadable Telegram document. Useful on platforms like Railway
+     where the filesystem is not permanently persisted across deploys.
+   - /restore asks you to send a previously downloaded backup file back
+     to the bot, then replaces the current data with it.
 
 Setup
 -----
 1. pip install -r requirements.txt
-2. Create a free MongoDB Atlas cluster (see README.md for step-by-step).
-3. Create a bot with @BotFather on Telegram and copy the bot token.
-4. Get your Telegram numeric chat ID (and every other admin/owner's ID)
-   via @userinfobot on Telegram.
-5. Set the environment variables below (see README.md).
-6. Run:  python main.py
+2. Create a bot with @BotFather on Telegram and copy the bot token.
+3. Get your Telegram numeric chat ID (and every other admin/owner's ID) -
+   the easiest way is to message @userinfobot on Telegram.
+4. Fill in BOT_TOKEN and ADMIN_IDS below (or set them as environment
+   variables - see the bottom of this file).
+5. Run:  python gym_bot.py
 
 All bot-facing messages are in English and written in a professional tone,
 as requested.
@@ -73,7 +66,6 @@ from datetime import datetime, date
 from pathlib import Path
 
 from dateutil.relativedelta import relativedelta
-from motor.motor_asyncio import AsyncIOMotorClient
 
 from telegram import Update, Document
 from telegram.ext import (
@@ -88,11 +80,10 @@ from telegram.ext import (
 # CONFIGURATION
 # --------------------------------------------------------------------------- #
 
-# Set these as environment variables (recommended, especially on Railway):
-#   GYM_BOT_TOKEN   - your Telegram bot token from @BotFather
-#   GYM_BOT_ADMINS  - comma separated numeric Telegram chat IDs
-#   MONGO_URI       - your MongoDB Atlas connection string
-#   MONGO_DB_NAME   - (optional) database name, defaults to "gym_bot"
+# You can either hardcode these two values, or (recommended) set them as
+# environment variables before starting the bot:
+#   export GYM_BOT_TOKEN="123456:ABC-your-bot-token"
+#   export GYM_BOT_ADMINS="111111111,222222222"
 BOT_TOKEN = os.environ.get("GYM_BOT_TOKEN", "PUT_YOUR_BOT_TOKEN_HERE")
 
 ADMIN_IDS = [
@@ -104,9 +95,7 @@ ADMIN_IDS = [
     # 222222222,
 ]
 
-MONGO_URI = os.environ.get("MONGO_URI", "")
-MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "gym_bot")
-
+DATA_FILE = Path(__file__).parent / "members.json"
 DATE_FMT = "%d/%m/%Y"
 DEFAULT_PLAN_MONTHS = 1
 
@@ -120,58 +109,21 @@ logger = logging.getLogger("gym_bot")
 # backup file for /restore.
 AWAITING_RESTORE = set()
 
-# --------------------------------------------------------------------------- #
-# MONGODB CONNECTION
-# --------------------------------------------------------------------------- #
-
-_mongo_client = None
-_members_collection = None
-
-
-def get_collection():
-    """Lazily initializes and returns the MongoDB 'members' collection."""
-    global _mongo_client, _members_collection
-    if _members_collection is None:
-        _mongo_client = AsyncIOMotorClient(MONGO_URI)
-        db = _mongo_client[MONGO_DB_NAME]
-        _members_collection = db["members"]
-    return _members_collection
-
 
 # --------------------------------------------------------------------------- #
-# DATA LAYER (MongoDB, keyed by phone number as the document _id)
+# DATA LAYER (simple JSON file, keyed by phone number)
 # --------------------------------------------------------------------------- #
 
-async def load_members() -> dict:
-    """Returns all members as {number: {name, number, start_date, expiry_date, plan_months, status}}."""
-    collection = get_collection()
-    members = {}
-    async for doc in collection.find({}):
-        number = doc["_id"]
-        doc.pop("_id", None)
-        members[number] = doc
-    return members
+def load_members() -> dict:
+    if not DATA_FILE.exists():
+        return {}
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-async def save_member(number: str, data: dict) -> None:
-    """Inserts or updates a single member document."""
-    collection = get_collection()
-    await collection.replace_one({"_id": number}, data, upsert=True)
-
-
-async def delete_member_doc(number: str) -> bool:
-    collection = get_collection()
-    result = await collection.delete_one({"_id": number})
-    return result.deleted_count > 0
-
-
-async def restore_all_members(members: dict) -> None:
-    """Wipes the collection and replaces it with the given data (used by /restore)."""
-    collection = get_collection()
-    await collection.delete_many({})
-    if members:
-        docs = [{"_id": number, **data} for number, data in members.items()]
-        await collection.insert_many(docs)
+def save_members(members: dict) -> None:
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(members, f, indent=2, ensure_ascii=False)
 
 
 def normalize_number(raw: str) -> str:
@@ -259,6 +211,7 @@ async def add_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
         return
 
+    # Check whether the last token is a duration (1m, 3m, 6m, 12m, etc.)
     maybe_duration = parse_duration_months(args[-1])
     if maybe_duration is not None and len(args) >= 4:
         plan_months = maybe_duration
@@ -288,11 +241,11 @@ async def add_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     expiry_dt = start_dt + relativedelta(months=plan_months)
 
-    members = await load_members()
+    members = load_members()
     is_update = number in members
     final_name = unique_display_name(members, name, exclude_number=number)
 
-    new_doc = {
+    members[number] = {
         "name": final_name,
         "number": number,
         "start_date": start_dt.strftime(DATE_FMT),
@@ -300,7 +253,7 @@ async def add_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "plan_months": plan_months,
         "status": "active",
     }
-    await save_member(number, new_doc)
+    save_members(members)
 
     action = "updated" if is_update else "added"
     await update.message.reply_text(
@@ -334,7 +287,7 @@ async def edit_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    members = await load_members()
+    members = load_members()
     if number not in members:
         await update.message.reply_text(f"No member found with number {number}.")
         return
@@ -346,7 +299,7 @@ async def edit_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     member["plan_months"] = plan_months
     member["expiry_date"] = new_expiry.strftime(DATE_FMT)
     member["status"] = "active" if new_expiry >= date.today() else "expired"
-    await save_member(number, member)
+    save_members(members)
 
     await update.message.reply_text(
         f"Subscription plan updated successfully.\n\n"
@@ -361,7 +314,7 @@ async def list_members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not is_admin(update.effective_user.id):
         return await deny_access(update)
 
-    members = await load_members()
+    members = load_members()
     if not members:
         await update.message.reply_text("No members found.")
         return
@@ -378,7 +331,7 @@ async def due_members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not is_admin(update.effective_user.id):
         return await deny_access(update)
 
-    members = await load_members()
+    members = load_members()
     today = date.today()
     due_list = []
     for m in members.values():
@@ -406,7 +359,7 @@ async def mark_paid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     number = normalize_number(args[0])
-    members = await load_members()
+    members = load_members()
 
     if number not in members:
         await update.message.reply_text(f"No member found with number {number}.")
@@ -417,12 +370,14 @@ async def mark_paid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     today = date.today()
     current_expiry = datetime.strptime(member["expiry_date"], DATE_FMT).date()
 
+    # If renewed early, extend from current expiry date; if already
+    # expired, extend from today. Always uses the member's configured plan.
     base_date = current_expiry if current_expiry > today else today
     new_expiry = base_date + relativedelta(months=plan_months)
 
     member["expiry_date"] = new_expiry.strftime(DATE_FMT)
     member["status"] = "active"
-    await save_member(number, member)
+    save_members(members)
 
     await update.message.reply_text(
         f"Payment recorded successfully.\n\n"
@@ -443,14 +398,14 @@ async def delete_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     number = normalize_number(args[0])
-    members = await load_members()
+    members = load_members()
 
     if number not in members:
         await update.message.reply_text(f"No member found with number {number}.")
         return
 
-    removed = members[number]
-    await delete_member_doc(number)
+    removed = members.pop(number)
+    save_members(members)
 
     await update.message.reply_text(
         f"Member removed successfully.\n\n"
@@ -460,32 +415,26 @@ async def delete_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # --------------------------------------------------------------------------- #
-# BACKUP / RESTORE (extra manual safety net on top of MongoDB persistence)
+# BACKUP / RESTORE (important on platforms like Railway with ephemeral disk)
 # --------------------------------------------------------------------------- #
 
 async def backup_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
         return await deny_access(update)
 
-    members = await load_members()
-    if not members:
+    if not DATA_FILE.exists():
         await update.message.reply_text("No data to back up yet. Add a member first.")
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    temp_path = Path(f"/tmp/members_backup_{timestamp}.json")
-    with open(temp_path, "w", encoding="utf-8") as f:
-        json.dump(members, f, indent=2, ensure_ascii=False)
-
     await update.message.reply_document(
-        document=open(temp_path, "rb"),
-        filename=temp_path.name,
+        document=open(DATA_FILE, "rb"),
+        filename=f"members_backup_{timestamp}.json",
         caption=(
             "Here is your current member data backup.\n"
             "Save this file safely. Use /restore to load it back into the bot later."
         ),
     )
-    temp_path.unlink(missing_ok=True)
 
 
 async def restore_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -506,6 +455,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return await deny_access(update)
 
     if user_id not in AWAITING_RESTORE:
+        # Ignore random documents sent without /restore being requested first.
         return
 
     document: Document = update.message.document
@@ -526,11 +476,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception:
         await update.message.reply_text(
             "Failed to read this backup file. Please make sure it is a valid, unmodified "
-            "backup and try /restore again."
+            "members.json backup and try /restore again."
         )
         return
 
-    await restore_all_members(restored_data)
+    save_members(restored_data)
     AWAITING_RESTORE.discard(user_id)
 
     await update.message.reply_text(
@@ -543,14 +493,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # --------------------------------------------------------------------------- #
 
 async def check_expiries(context: ContextTypes.DEFAULT_TYPE) -> None:
-    members = await load_members()
+    members = load_members()
     today = date.today()
+    changed = False
 
-    for number, member in members.items():
+    for member in members.values():
         expiry = datetime.strptime(member["expiry_date"], DATE_FMT).date()
         if expiry <= today and member["status"] != "expired":
             member["status"] = "expired"
-            await save_member(number, member)
+            changed = True
 
             message = (
                 f"{member['name']} ({member['number']}) - "
@@ -562,6 +513,9 @@ async def check_expiries(context: ContextTypes.DEFAULT_TYPE) -> None:
                 except Exception as e:
                     logger.error("Failed to notify admin %s: %s", admin_id, e)
 
+    if changed:
+        save_members(members)
+
 
 # --------------------------------------------------------------------------- #
 # APPLICATION ENTRY POINT
@@ -570,12 +524,7 @@ async def check_expiries(context: ContextTypes.DEFAULT_TYPE) -> None:
 def main() -> None:
     if BOT_TOKEN == "PUT_YOUR_BOT_TOKEN_HERE" or not BOT_TOKEN:
         raise SystemExit(
-            "Bot token not configured. Set the GYM_BOT_TOKEN environment variable."
-        )
-    if not MONGO_URI:
-        raise SystemExit(
-            "MongoDB not configured. Set the MONGO_URI environment variable "
-            "to your MongoDB Atlas connection string. See README.md for setup steps."
+            "Bot token not configured. Set GYM_BOT_TOKEN env variable or edit BOT_TOKEN in the script."
         )
     if not ADMIN_IDS:
         logger.warning(
