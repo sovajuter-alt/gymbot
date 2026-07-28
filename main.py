@@ -2,6 +2,10 @@
 Gym Membership Management Telegram Bot
 ========================================
 
+Storage: local JSON file (members.json)
+--------------------------------------------------------
+All data is stored in a simple members.json file next to this script.
+
 Features
 --------
 1. /add <name> <number> <dd/mm/yyyy> [duration]
@@ -14,7 +18,6 @@ Features
 
 2. /edit <number> <duration>
    - Changes a member's subscription plan/mode (e.g. monthly -> quarterly).
-   - "duration" uses the same format as /add: 1m, 3m, 6m, 12m, etc.
    - The member's expiry date is immediately recalculated from their
      original join date using the new duration, and this new duration
      becomes the default used every time /paid renews them going forward.
@@ -23,26 +26,32 @@ Features
    - Lists every member whose subscription has already expired.
 
 4. /members
-   - Lists every member with their full details (name, number, joined
-     date, plan, expiry date, status).
+   - Shows "Total Members: N" followed by a numbered, compact list
+     (name, number, expiry) of every member.
 
 5. /paid <number>
    - Looks up the member by phone number only and automatically renews
-     their subscription using their configured plan duration (1 month by
-     default, or whatever was last set with /add or /edit).
+     their subscription using their configured plan duration.
+   - Always extends from the member's existing expiry date (even if it
+     has already passed), so the math stays simple and predictable
+     regardless of how late the payment is.
 
-6. Automatic daily expiry check
+6. /delete <number>
+   - Permanently removes a member using only their phone number.
+
+7. Automatic daily expiry check
    - Runs once every day. Any member whose subscription expires "today"
      is marked as expired and a notification is sent to every configured
      admin/owner in the exact format:
          "Aditya (7992357603) - Subscription expired on 12/07/2026"
 
-7. /backup and /restore
+8. /backup and /restore
    - /backup sends the current members.json data file to you as a
-     downloadable Telegram document. Useful on platforms like Railway
-     where the filesystem is not permanently persisted across deploys.
-   - /restore asks you to send a previously downloaded backup file back
-     to the bot, then replaces the current data with it.
+     downloadable Telegram document. Useful as a manual safety net,
+     especially on platforms with ephemeral storage (like Railway),
+     since a redeploy or restart can wipe the local file.
+   - /restore lets you upload a previously downloaded backup file back
+     to the bot, replacing all current data with it.
 
 Setup
 -----
@@ -52,7 +61,7 @@ Setup
    the easiest way is to message @userinfobot on Telegram.
 4. Fill in BOT_TOKEN and ADMIN_IDS below (or set them as environment
    variables - see the bottom of this file).
-5. Run:  python gym_bot.py
+5. Run:  python main.py
 
 All bot-facing messages are in English and written in a professional tone,
 as requested.
@@ -211,7 +220,6 @@ async def add_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
         return
 
-    # Check whether the last token is a duration (1m, 3m, 6m, 12m, etc.)
     maybe_duration = parse_duration_months(args[-1])
     if maybe_duration is not None and len(args) >= 4:
         plan_months = maybe_duration
@@ -367,13 +375,12 @@ async def mark_paid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     member = members[number]
     plan_months = member.get("plan_months", DEFAULT_PLAN_MONTHS)
-    today = date.today()
     current_expiry = datetime.strptime(member["expiry_date"], DATE_FMT).date()
 
-    # If renewed early, extend from current expiry date; if already
-    # expired, extend from today. Always uses the member's configured plan.
-    base_date = current_expiry if current_expiry > today else today
-    new_expiry = base_date + relativedelta(months=plan_months)
+    # Always extend from the existing expiry date, even if it has already
+    # passed - keeps the math simple and predictable regardless of how
+    # late the payment is.
+    new_expiry = current_expiry + relativedelta(months=plan_months)
 
     member["expiry_date"] = new_expiry.strftime(DATE_FMT)
     member["status"] = "active"
