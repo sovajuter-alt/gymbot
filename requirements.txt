@@ -1,0 +1,2 @@
+python-telegram-bot[job-queue]==21.6
+python-dateutil==2.9.0.post0
