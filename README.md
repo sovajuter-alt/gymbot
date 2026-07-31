@@ -56,12 +56,25 @@ Aditya (7992357603) - Subscription expired on 12/07/2026
 | `/due` | Jinka subscription expire ho chuka hai unki list. |
 | `/paid <number>` | Number se member dhoond kar uske plan ke hisaab se renew karta hai. |
 | `/delete <number>` | Sirf number dalke member ko permanently remove karta hai. |
+| `/find <number ya naam>` | Number se exact member milega, naam se (ya part se) sab matching members milenge. |
+| `/1m` / `/3m` / `/6m` / `/1y` | Us plan ke sab members ki list dikhata hai (jaise sab 3-month wale members). |
+| `/permission <id ya @username>` | Naye admin ko seedha bot se access de deta hai, Railway settings me jaane ki zarurat nahi. |
 | `/backup` | Current data (`members.json`) ko file ke roop me bhejta hai. |
 | `/restore` | Pehle liya gaya backup file wapas load karne ke liye. |
 
 ### Duration format
 `1m`, `3m`, `6m`, `12m` — ya likhna chahein to `1month`, `3months` bhi chalega.
 Agar `/add` me duration diya hi nahi, toh default **1 month** lagega.
+
+### Naya admin add karna (`/permission`)
+Numeric Telegram ID use karna sabse reliable hai (usse `@userinfobot` se milta hai). Username
+(`@kuch_naam`) bhi chalega, lekin sirf tab jab us insaan ne bot ko kabhi message kiya ho ya
+uska username public ho — Telegram ki apni limitation hai ki har username hamesha resolve nahi
+hota. Agar username kaam na kare, numeric ID try karo.
+
+Naye admin ka access `admins_extra.json` file me save hota hai (separate file, `members.json`
+se alag) — isliye ye bhi Railway pe `/backup`-jaisa hi ephemeral hai, matlab agar Railway
+data reset ho jaye to naye admins ko dobara `/permission` se add karna padega.
 
 ### Examples
 
@@ -106,6 +119,43 @@ Backup restore karna:
 ```
 → Bot poochega "please send the backup file". Uske baad wahi `.json` file bot ko
 document ke roop me bhej do, data wapas load ho jayega.
+
+**`/find 7992357603`** (number se exact search)
+```
+Name: Aditya
+Number: 7992357603
+Joined: 12/06/2026
+Plan: 1 month
+Expiry: 12/07/2026
+Status: Active
+```
+
+**`/find Yash`** (naam se, jitne bhi match karein)
+```
+Found 2 member(s) matching 'Yash':
+
+- Yash Kumar | 7992357603 | Plan: 1 month | Expiry: 01/08/2026 | Status: Active
+- Yash Singh | 9876543210 | Plan: 3 months | Expiry: 01/10/2026 | Status: Active
+```
+
+**`/3m`** (jitne bhi members 3-month plan pe hain)
+```
+Members on the 3 months plan - Total: 5
+
+1. Rohit | 9876543210 | Expiry: 01/10/2026
+2. ...
+```
+Isi tarah `/1m`, `/6m`, `/1y` bhi chalega.
+
+**`/permission 7992357603`** (numeric Telegram ID se naya admin add karna)
+```
+Admin access granted successfully to ID: 7992357603
+They can now use all admin commands on this bot.
+```
+Agar ID already admin hai:
+```
+This person already has admin access.
+```
 
 ### Duplicate naam handling
 Agar do members ka naam same hai (jaise dono "Aditya"), toh bot khud dusre wale ko
