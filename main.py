@@ -53,6 +53,23 @@ Features
    - /restore lets you upload a previously downloaded backup file back
      to the bot, replacing all current data with it.
 
+9. /1m, /3m, /6m, /1y (and any /<N>m you like)
+   - Lists every member currently on that exact plan duration, so you
+     can quickly see "who is on the 3 month plan" etc.
+
+10. /find <query>
+    - If the query is a phone number, shows that member's exact details.
+    - If the query is a name (or part of a name), shows every member
+      whose name contains that text - handy when you don't remember
+      the exact spelling or number.
+
+11. /permission <numeric_id_or_@username>
+    - Grants another person admin access to the bot directly from
+      Telegram, no need to touch Railway environment variables.
+    - Prefer the numeric Telegram ID (from @userinfobot) - usernames
+      only resolve if that person has a public username and Telegram
+      is able to look it up, which isn't always guaranteed.
+
 Setup
 -----
 1. pip install -r requirements.txt
@@ -105,6 +122,7 @@ ADMIN_IDS = [
 ]
 
 DATA_FILE = Path(__file__).parent / "members.json"
+ADMIN_FILE = Path(__file__).parent / "admins_extra.json"
 DATE_FMT = "%d/%m/%Y"
 DEFAULT_PLAN_MONTHS = 1
 
@@ -117,6 +135,25 @@ logger = logging.getLogger("gym_bot")
 # In-memory flag: which admin user_ids are currently expected to send a
 # backup file for /restore.
 AWAITING_RESTORE = set()
+
+
+def load_extra_admins() -> list:
+    """Admins added later via /permission, stored separately from the
+    original env-configured ADMIN_IDS so they survive restarts."""
+    if not ADMIN_FILE.exists():
+        return []
+    with open(ADMIN_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_extra_admins(ids: list) -> None:
+    with open(ADMIN_FILE, "w", encoding="utf-8") as f:
+        json.dump(ids, f, indent=2)
+
+
+# Combined set of admins: the ones from the GYM_BOT_ADMINS env variable,
+# plus any added later via /permission (persisted in admins_extra.json).
+ADMIN_IDS = set(ADMIN_IDS) | set(load_extra_admins())
 
 
 # --------------------------------------------------------------------------- #
@@ -201,6 +238,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/due - View expired memberships\n"
         "/paid <number> - Renew a member's subscription\n"
         "/delete <number> - Remove a member\n"
+        "/find <number or name> - Look up a member\n"
+        "/1m, /3m, /6m, /1y - List members on that plan\n"
+        "/permission <id or @username> - Grant admin access\n"
         "/backup - Download the current data as a file\n"
         "/restore - Restore data from a previously downloaded backup file\n\n"
         "Duration format: 1m, 3m, 6m, 12m (defaults to 1m if not specified)"
@@ -421,6 +461,150 @@ async def delete_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+async def find_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update.effective_user.id):
+        return await deny_access(update)
+
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Usage: /find <number or name>\n"
+            "Example: /find 7992357603\n"
+            "Example: /find Yash"
+        )
+        return
+
+    query = " ".join(args).strip()
+    members = load_members()
+
+    # If the query looks like a phone number, do an exact lookup.
+    digits_only = re.sub(r"\D", "", query)
+    if digits_only and digits_only == query.replace(" ", "").replace("+", ""):
+        number = normalize_number(query)
+        if number in members:
+            m = members[number]
+            plan_months = m.get("plan_months", DEFAULT_PLAN_MONTHS)
+            await update.message.reply_text(
+                f"Name: {m['name']}\n"
+                f"Number: {m['number']}\n"
+                f"Joined: {m['start_date']}\n"
+                f"Plan: {format_plan(plan_months)}\n"
+                f"Expiry: {m['expiry_date']}\n"
+                f"Status: {m['status'].capitalize()}"
+            )
+        else:
+            await update.message.reply_text(f"No member found with number {number}.")
+        return
+
+    # Otherwise, treat it as a (partial) name search.
+    matches = [m for m in members.values() if query.lower() in m["name"].lower()]
+    if not matches:
+        await update.message.reply_text(f"No members found matching '{query}'.")
+        return
+
+    lines = [f"Found {len(matches)} member(s) matching '{query}':\n"]
+    for m in sorted(matches, key=lambda x: x["name"].lower()):
+        plan_months = m.get("plan_months", DEFAULT_PLAN_MONTHS)
+        lines.append(
+            f"- {m['name']} | {m['number']} | Plan: {format_plan(plan_months)} | "
+            f"Expiry: {m['expiry_date']} | Status: {m['status'].capitalize()}"
+        )
+    await update.message.reply_text("\n".join(lines))
+
+
+async def members_by_plan(update: Update, context: ContextTypes.DEFAULT_TYPE, months: int) -> None:
+    if not is_admin(update.effective_user.id):
+        return await deny_access(update)
+
+    members = load_members()
+    matches = [
+        m for m in members.values()
+        if m.get("plan_months", DEFAULT_PLAN_MONTHS) == months
+    ]
+
+    if not matches:
+        await update.message.reply_text(f"No members found on the {format_plan(months)} plan.")
+        return
+
+    lines = [f"Members on the {format_plan(months)} plan - Total: {len(matches)}\n"]
+    for i, m in enumerate(sorted(matches, key=lambda x: x["name"].lower()), start=1):
+        lines.append(f"{i}. {m['name']} | {m['number']} | Expiry: {m['expiry_date']}")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def plan_1m(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await members_by_plan(update, context, 1)
+
+
+async def plan_3m(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await members_by_plan(update, context, 3)
+
+
+async def plan_6m(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await members_by_plan(update, context, 6)
+
+
+async def plan_1y(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await members_by_plan(update, context, 12)
+
+
+# --------------------------------------------------------------------------- #
+# ADMIN PERMISSIONS
+# --------------------------------------------------------------------------- #
+
+async def grant_permission(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update.effective_user.id):
+        return await deny_access(update)
+
+    args = context.args
+    if len(args) != 1:
+        await update.message.reply_text(
+            "Usage: /permission <numeric_telegram_id_or_@username>\n"
+            "Example: /permission 7992357603\n"
+            "Example: /permission @someusername\n\n"
+            "Tip: the numeric ID (from @userinfobot) is more reliable than a username."
+        )
+        return
+
+    target = args[0].strip()
+
+    if target.startswith("@"):
+        try:
+            chat = await context.bot.get_chat(target)
+            new_id = chat.id
+        except Exception:
+            await update.message.reply_text(
+                f"Could not resolve username {target}. This can happen if that person has "
+                "never messaged this bot, or has no public username. Please ask them to "
+                "message @userinfobot on Telegram and send you their numeric ID instead, "
+                "then use /permission with that number."
+            )
+            return
+    else:
+        try:
+            new_id = int(target)
+        except ValueError:
+            await update.message.reply_text(
+                "Please provide a valid numeric Telegram ID or a @username."
+            )
+            return
+
+    if new_id in ADMIN_IDS:
+        await update.message.reply_text("This person already has admin access.")
+        return
+
+    ADMIN_IDS.add(new_id)
+    extra_admins = load_extra_admins()
+    if new_id not in extra_admins:
+        extra_admins.append(new_id)
+        save_extra_admins(extra_admins)
+
+    await update.message.reply_text(
+        f"Admin access granted successfully to ID: {new_id}\n"
+        "They can now use all admin commands on this bot."
+    )
+
+
 # --------------------------------------------------------------------------- #
 # BACKUP / RESTORE (important on platforms like Railway with ephemeral disk)
 # --------------------------------------------------------------------------- #
@@ -548,6 +732,12 @@ def main() -> None:
     application.add_handler(CommandHandler("due", due_members))
     application.add_handler(CommandHandler("paid", mark_paid))
     application.add_handler(CommandHandler("delete", delete_member))
+    application.add_handler(CommandHandler("find", find_member))
+    application.add_handler(CommandHandler("1m", plan_1m))
+    application.add_handler(CommandHandler("3m", plan_3m))
+    application.add_handler(CommandHandler("6m", plan_6m))
+    application.add_handler(CommandHandler("1y", plan_1y))
+    application.add_handler(CommandHandler("permission", grant_permission))
     application.add_handler(CommandHandler("backup", backup_data))
     application.add_handler(CommandHandler("restore", restore_data))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
